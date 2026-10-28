@@ -24,6 +24,7 @@ use crate::prefs::{self, Settings};
 use crate::snow::{self, Command, Links};
 use crate::update::{self, Release};
 use crate::welcome::{self, Handlers};
+use snowhush::cursor_snow::Level;
 use snowhush::simulation::Snowfall;
 
 const CLASS: PCWSTR = w!("SnowhushController");
@@ -39,6 +40,11 @@ const ID_BEHIND: u32 = 205;
 const ID_QUIT: u32 = 299;
 const ID_UPDATES: u32 = 206;
 const ID_CLEAR: u32 = 207;
+const ID_CURSOR_ENABLE: u32 = 210;
+const ID_CURSOR_AMOUNT: u32 = 211;
+const ID_CURSOR_ADHESION: u32 = 214;
+const ID_CURSOR_SHAKE: u32 = 217;
+const ID_CURSOR_MELT: u32 = 218;
 const TIMER_WELCOME: usize = 1;
 const TIMER_UPDATES: usize = 2;
 const WM_UPDATE: u32 = WM_APP + 2;
@@ -233,6 +239,24 @@ fn show_menu(window: HWND, x: i32, y: i32) {
         let windows = MF_STRING | checked(settings.snow_on_windows) | if settings.behind_windows { MF_GRAYED } else { MF_ENABLED };
         let _ = AppendMenuW(menu, windows, ID_WINDOWS as usize, w!("Snow on Windows"));
         let _ = AppendMenuW(menu, MF_STRING, ID_CLEAR as usize, w!("Clear Snow"));
+        let Ok(cursor) = CreatePopupMenu() else { return };
+        let _ = AppendMenuW(cursor, MF_STRING | checked(settings.cursor_snow.enabled), ID_CURSOR_ENABLE as usize, w!("Enable"));
+        let Ok(amount) = CreatePopupMenu() else { return };
+        let Ok(adhesion) = CreatePopupMenu() else { return };
+        for (i, level) in Level::ALL.iter().enumerate() {
+            let title: Vec<u16> = level.title().encode_utf16().chain([0]).collect();
+            let _ = AppendMenuW(amount, MF_STRING, (ID_CURSOR_AMOUNT + i as u32) as usize, PCWSTR(title.as_ptr()));
+            let _ = AppendMenuW(adhesion, MF_STRING, (ID_CURSOR_ADHESION + i as u32) as usize, PCWSTR(title.as_ptr()));
+        }
+        let amount_index = Level::ALL.iter().position(|&v| v == settings.cursor_snow.amount).unwrap_or(1) as u32;
+        let adhesion_index = Level::ALL.iter().position(|&v| v == settings.cursor_snow.adhesion).unwrap_or(1) as u32;
+        let _ = CheckMenuRadioItem(amount, ID_CURSOR_AMOUNT, ID_CURSOR_AMOUNT + 2, ID_CURSOR_AMOUNT + amount_index, MF_BYCOMMAND.0);
+        let _ = CheckMenuRadioItem(adhesion, ID_CURSOR_ADHESION, ID_CURSOR_ADHESION + 2, ID_CURSOR_ADHESION + adhesion_index, MF_BYCOMMAND.0);
+        let _ = AppendMenuW(cursor, MF_POPUP, amount.0 as usize, w!("Accumulation Amount"));
+        let _ = AppendMenuW(cursor, MF_POPUP, adhesion.0 as usize, w!("Snow Adhesion"));
+        let _ = AppendMenuW(cursor, MF_STRING | checked(settings.cursor_snow.shake), ID_CURSOR_SHAKE as usize, w!("Shake to Remove Snow"));
+        let _ = AppendMenuW(cursor, MF_STRING | checked(settings.cursor_snow.melting), ID_CURSOR_MELT as usize, w!("Cursor Snow Melting"));
+        let _ = AppendMenuW(menu, MF_POPUP, cursor.0 as usize, w!("Cursor Snow"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         let _ = AppendMenuW(menu, MF_STRING | checked(settings.behind_windows), ID_BEHIND as usize, w!("Behind Windows"));
         let _ = AppendMenuW(menu, MF_STRING | checked(settings.show_in_screenshots), ID_SCREENSHOTS as usize, w!("Show in Screenshots"));
@@ -269,6 +293,22 @@ fn choose(window: HWND, chosen: u32, login: bool) {
             let Some(app) = app else { return };
             let settings = &mut app.settings;
             let command = match chosen {
+                ID_CURSOR_ENABLE | ID_CURSOR_SHAKE | ID_CURSOR_MELT => {
+                    match chosen {
+                        ID_CURSOR_ENABLE => settings.cursor_snow.enabled = !settings.cursor_snow.enabled,
+                        ID_CURSOR_SHAKE => settings.cursor_snow.shake = !settings.cursor_snow.shake,
+                        _ => settings.cursor_snow.melting = !settings.cursor_snow.melting,
+                    }
+                    Command::CursorSnow(settings.cursor_snow)
+                }
+                ID_CURSOR_AMOUNT..=213 => {
+                    settings.cursor_snow.amount = Level::ALL[(chosen - ID_CURSOR_AMOUNT) as usize];
+                    Command::CursorSnow(settings.cursor_snow)
+                }
+                ID_CURSOR_ADHESION..=216 => {
+                    settings.cursor_snow.adhesion = Level::ALL[(chosen - ID_CURSOR_ADHESION) as usize];
+                    Command::CursorSnow(settings.cursor_snow)
+                }
                 ID_ACCUMULATE => {
                     settings.accumulate = !settings.accumulate;
                     Command::Accumulate(settings.accumulate)

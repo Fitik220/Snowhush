@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use windows::Win32::Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWM_TIMING_INFO, DwmGetCompositionTimingInfo};
 use windows::Win32::Graphics::Gdi::{
-    DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST,
-    MONITORINFO, MONITORINFOEXW, MonitorFromWindow, ScreenToClient,
+    DEVMODEW, DeleteObject, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW, HDC, HMONITOR,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow, ScreenToClient,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
@@ -19,6 +19,7 @@ use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, Error, PCWSTR, Result, w};
 
+use snowhush::cursor_snow::CursorSample;
 use snowhush::geometry::V2;
 use snowhush::simulation::{Pace, SnowSimulation, WindowId, WindowSurface};
 
@@ -218,6 +219,9 @@ pub struct Screen {
     backdrop: Option<Backdrop>,
     shadow_tint: [f32; 4],
     layer: Option<DesktopLayer>,
+    cursor_handle: usize,
+    arrow_handle: usize,
+    cursor_hotspot: POINT,
 }
 
 impl Screen {
@@ -252,6 +256,9 @@ impl Screen {
             backdrop: None,
             shadow_tint: [0.0; 4],
             layer,
+            cursor_handle: 0,
+            arrow_handle: unsafe { LoadCursorW(None, IDC_ARROW) }.ok().map_or(0, |handle| handle.0 as usize),
+            cursor_hotspot: POINT::default(),
         })
     }
 
@@ -289,7 +296,9 @@ impl Screen {
         if let Some(tracker) = windows {
             self.follow(tracker, clock, now);
         }
-        let changed = self.simulation.step(dt, self.cursor());
+        let (cursor, cursor_snow) = self.cursor();
+        self.simulation.set_cursor_sample(cursor_snow);
+        let changed = self.simulation.step(dt, cursor);
 
         let fastest = if budget == PowerBudget::Full { self.interactive_rate } else { self.interactive_rate.min(60) };
         // 24 only where it divides the display's rate evenly; elsewhere it would judder.
@@ -412,12 +421,46 @@ impl Screen {
     }
 
     /// The pointer in overlay coordinates.
-    fn cursor(&self) -> V2 {
-        let mut point = POINT::default();
-        if unsafe { GetCursorPos(&mut point) }.is_err() {
-            return V2::new(-10_000.0, -10_000.0);
+    fn cursor(&mut self) -> (V2, Option<CursorSample>) {
+        if !self.simulation.cursor_snow_enabled() {
+            let mut point = POINT::default();
+            if unsafe { GetCursorPos(&mut point) }.is_err() {
+                return (V2::new(-10_000.0, -10_000.0), None);
+            }
+            return (self.local(point.x as f32, point.y as f32), None);
         }
-        self.local(point.x as f32, point.y as f32)
+        let mut info = CURSORINFO { cbSize: size_of::<CURSORINFO>() as u32, ..Default::default() };
+        if unsafe { GetCursorInfo(&mut info) }.is_err() {
+            return (V2::new(-10_000.0, -10_000.0), None);
+        }
+        let position = self.local(info.ptScreenPos.x as f32, info.ptScreenPos.y as f32);
+        let identity = info.hCursor.0 as usize;
+        if identity != self.cursor_handle {
+            self.cursor_handle = identity;
+            self.cursor_hotspot = POINT::default();
+            let mut icon = ICONINFO::default();
+            if unsafe { GetIconInfo(info.hCursor.into(), &mut icon) }.is_ok() {
+                self.cursor_hotspot = POINT { x: icon.xHotspot as i32, y: icon.yHotspot as i32 };
+                unsafe {
+                    if !icon.hbmColor.is_invalid() {
+                        let _ = DeleteObject(icon.hbmColor.into());
+                    }
+                    if !icon.hbmMask.is_invalid() {
+                        let _ = DeleteObject(icon.hbmMask.into());
+                    }
+                }
+            }
+        }
+        let arrow = identity != 0 && identity == self.arrow_handle;
+        let scale = 96.0 / self.monitor.dpi.max(96) as f32;
+        let tip = position + V2::new(-self.cursor_hotspot.x as f32 * scale, self.cursor_hotspot.y as f32 * scale);
+        let sample = self.contains(info.ptScreenPos.x as f32, info.ptScreenPos.y as f32).then_some(CursorSample {
+            tip,
+            visible: info.flags.0 & CURSOR_SHOWING.0 != 0,
+            arrow,
+            identity,
+        });
+        (position, sample)
     }
 
     /// A point in physical screen pixels in overlay coordinates: DIPs up from the bottom left of this display's work area.

@@ -32,6 +32,11 @@ A tiny app that lives in the menu bar on macOS and in the tray on Windows. Soft 
 
 Everything else lives in the menu bar: Snowfall (Off, Light, Steady, Heavy, Variable), Accumulate, Melt Snow, Snow on Windows, Clear Snow, Behind Windows, Show in Screenshots and Open at Login.
 
+On Windows, the tray also offers **Cursor Snow**. When enabled, small flakes can
+rest on the standard arrow cursor and shed as it moves. See
+[`windows/CURSOR_SNOW.md`](windows/CURSOR_SNOW.md) for settings, build steps and
+the visual approximation's limits.
+
 ## Building
 
 ```sh

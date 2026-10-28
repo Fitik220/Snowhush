@@ -1,5 +1,6 @@
 #[cfg(windows)]
 pub mod card;
+pub mod cursor_snow;
 pub mod geometry;
 #[cfg(windows)]
 pub mod install;

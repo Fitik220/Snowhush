@@ -13,6 +13,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, PCWSTR, Result, w};
 
+use snowhush::cursor_snow::CursorSettings;
 use snowhush::geometry::V2;
 use snowhush::simulation::{ScatterPiece, SnowSimulation, Snowfall};
 
@@ -36,6 +37,7 @@ pub enum Command {
     Snowfall(Snowfall),
     Accumulate(bool),
     Melt(bool),
+    CursorSnow(CursorSettings),
     SnowOnWindows(bool),
     BehindWindows(bool),
     /// Explorer started again, taking the desktop's wallpaper layer with it.
@@ -110,6 +112,10 @@ fn run_loop(commands: &Receiver<Command>, links: &Links, mut settings: Settings)
                 Command::Melt(on) => {
                     settings.melt = on;
                     screens.iter_mut().for_each(|screen| screen.simulation.thaws = on);
+                }
+                Command::CursorSnow(value) => {
+                    settings.cursor_snow = value;
+                    screens.iter_mut().for_each(|screen| screen.simulation.set_cursor_snow(value));
                 }
                 Command::SnowOnWindows(on) => {
                     settings.snow_on_windows = on;
@@ -348,6 +354,7 @@ fn new_simulation(monitor: &Monitor, settings: &Settings) -> SnowSimulation {
     let mut simulation = SnowSimulation::new(width as f32, height as f32, settings.snowfall);
     simulation.thaws = settings.melt;
     simulation.accumulates = settings.accumulate;
+    simulation.set_cursor_snow(settings.cursor_snow);
     simulation.set_snowfall_held(!settings.welcomed);
     simulation
 }

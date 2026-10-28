@@ -4,6 +4,7 @@ use std::f32::consts::{PI, TAU};
 use std::hash::{BuildHasher, Hasher};
 use std::ops::Range;
 
+use crate::cursor_snow::{CursorSample, CursorSettings, CursorSnow};
 use crate::geometry::{Rect, V2, smoothstep};
 use crate::layer::SnowLayer;
 
@@ -225,6 +226,7 @@ struct Air {
 }
 
 pub struct SnowSimulation {
+    cursor_snow: CursorSnow,
     width: f32,
     height: f32,
     pace: Pace,
@@ -258,6 +260,7 @@ impl SnowSimulation {
         let mut seed = Random::new();
         let ground = SnowLayer::new(V2::ZERO, column_count(width), COLUMN_WIDTH, GROUND_DEPTH, false, (seed.range(0.0, TAU), seed.range(0.0, TAU)));
         let mut simulation = SnowSimulation {
+            cursor_snow: CursorSnow::new(),
             width,
             height,
             pace: Pace::Calm,
@@ -344,7 +347,22 @@ impl SnowSimulation {
     }
 
     pub fn sprite_count(&self) -> usize {
-        self.air.flakes.len() + self.air.grains.len() + self.air.motes.len()
+        self.air.flakes.len() + self.air.grains.len() + self.air.motes.len() + self.cursor_snow.count()
+    }
+
+    pub fn set_cursor_snow(&mut self, settings: CursorSettings) {
+        self.cursor_snow.settings = settings;
+        if !settings.enabled {
+            self.cursor_snow.clear();
+        }
+    }
+
+    pub fn cursor_snow_enabled(&self) -> bool {
+        self.cursor_snow.settings.enabled
+    }
+
+    pub fn set_cursor_sample(&mut self, sample: Option<CursorSample>) {
+        self.cursor_snow.sample(sample);
     }
 
     /// Floats the renderer needs per frame: each layer's surface and bed.
@@ -365,7 +383,7 @@ impl SnowSimulation {
     /// Returns whether anything visible changed.
     pub fn step(&mut self, dt: f32, cursor: V2) -> bool {
         self.air.clock += dt as f64;
-        let was_moving = self.sprite_count() > 0;
+        let was_moving = !self.air.flakes.is_empty() || !self.air.grains.is_empty() || !self.air.motes.is_empty();
         self.air.heights_changed = false;
 
         self.vary(dt);
@@ -374,6 +392,20 @@ impl SnowSimulation {
             self.air.carry(ledge, dt);
         }
         self.track_cursor(cursor, dt);
+        for piece in self.cursor_snow.advance(dt, self.air.breeze()) {
+            if let Some(piece) = piece
+                && self.air.grains.len() < MAX_GRAINS
+            {
+                self.air.grains.push(Grain {
+                    position: piece.position,
+                    velocity: piece.velocity,
+                    area: piece.area,
+                    size: piece.area.sqrt().clamp(0.7, 2.0),
+                    lump: 0.0,
+                    blown: false,
+                });
+            }
+        }
         for (li, ledge) in self.layers.iter_mut().enumerate().skip(1) {
             self.air.confine(ledge, li, self.width, self.walls);
         }
@@ -393,7 +425,8 @@ impl SnowSimulation {
         }
         let air = &self.air;
         // Only a cursor that actually displaces snow needs the full rate; one passing near it or resting in it changes nothing.
-        let pushed = air.clock - air.last_window_motion < 0.6 || air.clock - air.last_cursor_push < 0.3 || air.gust.is_some();
+        let pushed =
+            air.clock - air.last_window_motion < 0.6 || air.clock - air.last_cursor_push < 0.3 || air.gust.is_some() || self.cursor_snow.moving();
         // The steady trickle off window corners is a few tiny grains at a time; they read fine at the calm rate.
         let flying = air.grains.len() > 24 || air.clock < self.scattered_until;
         self.pace = if pushed {
@@ -403,7 +436,13 @@ impl SnowSimulation {
         } else {
             Pace::Calm
         };
-        let changed = was_moving || self.sprite_count() > 0 || self.air.heights_changed || self.air.windows_changed;
+        let changed = was_moving
+            || !self.air.flakes.is_empty()
+            || !self.air.grains.is_empty()
+            || !self.air.motes.is_empty()
+            || self.air.heights_changed
+            || self.air.windows_changed
+            || self.cursor_snow.take_changed();
         self.air.windows_changed = false;
         changed
     }
@@ -445,6 +484,12 @@ impl SnowSimulation {
             *slot = sprite;
             count += 1;
         }
+        self.cursor_snow.sprites(|position, size, alpha| {
+            if let Some(slot) = buffer.get_mut(count) {
+                *slot = Sprite { position, size, alpha, soft: 0.55, tint: [1.0; 3], ..Sprite::default() };
+                count += 1;
+            }
+        });
         count
     }
 
@@ -698,6 +743,7 @@ impl SnowSimulation {
                 flake.tint_amount = (flake.tint_amount - dt * 1.3).max(0.0);
             }
             let previous_y = flake.position.y;
+            let previous_position = flake.position;
             flake.position.x += (flake.velocity.x + sway) * dt;
             flake.position.y += flake.velocity.y * flutter * dt;
 
@@ -711,6 +757,13 @@ impl SnowSimulation {
                 flake.position.x -= self.width + 60.0;
             }
 
+            if flake.settles
+                && flake.blown == 0.0
+                && self.cursor_snow.collide(previous_position, flake.position, flake.size * flake.size * flake.mass)
+            {
+                self.recycle(i);
+                continue;
+            }
             if flake.settles && self.accumulates && flake.blown == 0.0 {
                 if let Some((li, column)) = landing(&self.layers, flake.position.x, previous_y, flake.position.y) {
                     if self.snowfall_held && flake.mass < 1.0 && li == 0 {
@@ -836,6 +889,7 @@ impl SnowSimulation {
     /// Clears all the snow: a gust in `direction` lifts it off the ground and the windows and blows it off the screen,
     /// or, `calm`, it melts away where it lies.
     pub fn blow_away(&mut self, direction: f32, calm: bool) {
+        self.cursor_snow.clear();
         let direction = if direction < 0.0 { -1.0 } else { 1.0 };
         self.air.gust = Some(Gust { start: self.air.clock, direction, calm });
         // Snow kept for windows on other desktops goes too, out of sight.
@@ -1551,4 +1605,34 @@ fn smooth_damp(current: &mut V2, velocity: &mut V2, target: V2, time: f32, dt: f
 
 fn column_count(width: f32) -> usize {
     (width / COLUMN_WIDTH).ceil() as usize + 1
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    #[test]
+    fn falling_flake_becomes_attached_snow_then_a_gravity_particle() {
+        let mut simulation = SnowSimulation::new(300.0, 200.0, Snowfall::Off);
+        simulation.set_cursor_snow(CursorSettings { enabled: true, melting: false, ..CursorSettings::default() });
+        let sample = |x| CursorSample { tip: V2::new(x, 100.0), visible: true, arrow: true, identity: 1 };
+        simulation.set_cursor_sample(Some(sample(0.0)));
+        simulation.step(1.0 / 60.0, V2::new(0.0, 100.0));
+        let mut flake = simulation.air.make_flake(300.0, 200.0);
+        flake.position = V2::new(4.0, 98.5);
+        flake.velocity = V2::new(0.0, -200.0);
+        flake.fall_speed = 200.0;
+        flake.sway_amount = 0.0;
+        flake.settles = true;
+        simulation.air.flakes.push(flake);
+        simulation.step(1.0 / 60.0, V2::new(0.0, 100.0));
+        assert!(simulation.cursor_snow.total() > 0.0);
+        simulation.set_cursor_sample(Some(sample(50.0)));
+        simulation.step(1.0 / 60.0, V2::new(50.0, 100.0));
+        assert!(!simulation.air.grains.is_empty());
+        for _ in 0..120 {
+            simulation.step(1.0 / 60.0, V2::new(50.0, 100.0));
+        }
+        assert!(simulation.air.grains.is_empty(), "detached grains should fall and expire");
+    }
 }

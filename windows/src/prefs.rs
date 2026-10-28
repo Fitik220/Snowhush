@@ -7,6 +7,7 @@ use windows::Win32::System::Registry::{
 use windows::Win32::UI::WindowsAndMessaging::{SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW};
 use windows::core::{BOOL, PCWSTR, w};
 
+use snowhush::cursor_snow::{CursorSettings, Level};
 use snowhush::simulation::Snowfall;
 
 const KEY: PCWSTR = w!("Software\\Snowhush");
@@ -22,6 +23,7 @@ pub struct Settings {
     pub behind_windows: bool,
     pub show_in_screenshots: bool,
     pub welcomed: bool,
+    pub cursor_snow: CursorSettings,
 }
 
 impl Settings {
@@ -36,6 +38,7 @@ impl Settings {
             behind_windows: read(w!("behindWindows")).is_some_and(|v| v != 0),
             show_in_screenshots: read(w!("showInScreenshots")).is_some_and(|v| v != 0),
             welcomed: read(w!("welcomed")).is_some_and(|v| v != 0),
+            cursor_snow: load_cursor_settings(KEY),
         }
     }
 
@@ -48,7 +51,26 @@ impl Settings {
         write(w!("behindWindows"), self.behind_windows as u32);
         write(w!("showInScreenshots"), self.show_in_screenshots as u32);
         write(w!("welcomed"), self.welcomed as u32);
+        save_cursor_settings(KEY, self.cursor_snow);
     }
+}
+
+fn load_cursor_settings(key: PCWSTR) -> CursorSettings {
+    CursorSettings {
+        enabled: read_key(key, w!("cursorSnow")).is_some_and(|v| v != 0),
+        amount: Level::from_index(read_key(key, w!("cursorSnowAmount")).unwrap_or(1)),
+        adhesion: Level::from_index(read_key(key, w!("cursorSnowAdhesion")).unwrap_or(1)),
+        shake: read_key(key, w!("cursorSnowShake")).is_none_or(|v| v != 0),
+        melting: read_key(key, w!("cursorSnowMelting")).is_none_or(|v| v != 0),
+    }
+}
+
+fn save_cursor_settings(key: PCWSTR, settings: CursorSettings) {
+    write_key(key, w!("cursorSnow"), settings.enabled as u32);
+    write_key(key, w!("cursorSnowAmount"), settings.amount.index());
+    write_key(key, w!("cursorSnowAdhesion"), settings.adhesion.index());
+    write_key(key, w!("cursorSnowShake"), settings.shake as u32);
+    write_key(key, w!("cursorSnowMelting"), settings.melting as u32);
 }
 
 pub fn opens_at_login() -> bool {
@@ -80,16 +102,45 @@ fn command() -> Option<Vec<u16>> {
 }
 
 fn read(name: PCWSTR) -> Option<u32> {
+    read_key(KEY, name)
+}
+
+fn read_key(key: PCWSTR, name: PCWSTR) -> Option<u32> {
     let mut value = 0u32;
     let mut size = 4u32;
     let status =
-        unsafe { RegGetValueW(HKEY_CURRENT_USER, KEY, name, RRF_RT_REG_DWORD, None, Some((&raw mut value).cast::<c_void>()), Some(&mut size)) };
+        unsafe { RegGetValueW(HKEY_CURRENT_USER, key, name, RRF_RT_REG_DWORD, None, Some((&raw mut value).cast::<c_void>()), Some(&mut size)) };
     (status == ERROR_SUCCESS).then_some(value)
 }
 
 fn write(name: PCWSTR, value: u32) {
+    write_key(KEY, name, value)
+}
+
+fn write_key(key: PCWSTR, name: PCWSTR, value: u32) {
     unsafe {
-        let _ = RegSetKeyValueW(HKEY_CURRENT_USER, KEY, name, REG_DWORD.0, Some((&raw const value).cast::<c_void>()), 4);
+        let _ = RegSetKeyValueW(HKEY_CURRENT_USER, key, name, REG_DWORD.0, Some((&raw const value).cast::<c_void>()), 4);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::System::Registry::RegDeleteTreeW;
+
+    #[test]
+    fn cursor_settings_survive_registry_round_trip() {
+        const TEST_KEY: PCWSTR = w!("Software\\Snowhush-CursorSnow-Test");
+        let settings = CursorSettings { enabled: true, amount: Level::High, adhesion: Level::Low, shake: false, melting: false };
+        save_cursor_settings(TEST_KEY, settings);
+        let loaded = load_cursor_settings(TEST_KEY);
+        unsafe {
+            let _ = RegDeleteTreeW(HKEY_CURRENT_USER, TEST_KEY);
+        }
+        assert!(loaded.enabled);
+        assert_eq!(loaded.amount, Level::High);
+        assert_eq!(loaded.adhesion, Level::Low);
+        assert!(!loaded.shake && !loaded.melting);
     }
 }
 
